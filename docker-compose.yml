@@ -1,0 +1,14 @@
+version: '3'
+services:
+  pye2y:
+    build:
+      context: ./pye2y
+      args:
+        http_proxy: ${HTTP_PROXY}
+        https_proxy: ${HTTP_PROXY}
+        HTTP_PROXY: ${HTTP_PROXY}
+        HTTPS_PROXY: ${HTTP_PROXY}
+        PYTHON_VER: 2.7
+    tty: true
+    volumes:
+      - ./pye2y/src:/src
