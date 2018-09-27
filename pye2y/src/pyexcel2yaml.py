@@ -1,15 +1,23 @@
-# coding=utf-8
+# -*- coding: utf-8 -*-
 import codecs, sys
 import xlrd
 import yaml
 import re
-
+import os
 
 class Excel_2_Yaml():
-    def __init__(self, excel_path):
+    def __init__(self, excel_path, export_path):
         self.set_book(excel_path)
         self.set_sheets()
-
+        self.export_path = export_path
+        self.hostvars = {
+            'ansible': {},
+            'serverspec':{},
+        }
+        self.inventory = {
+            'ansible': [], 
+            'serverspec': []
+        }
 
     def set_book(self, excel_path):
         self.book = xlrd.open_workbook(excel_path)
@@ -21,7 +29,6 @@ class Excel_2_Yaml():
 
     def parse_inventory(self):
         inventory_sheet = self.sheets['Inventory']
-        self.inventory = {'ansible': [], 'serverspec': [] }
         for row in range(19, inventory_sheet.nrows):
             host_setting = {
                 'name': inventory_sheet.cell(row, 2).value,
@@ -58,13 +65,14 @@ class Excel_2_Yaml():
             if (not host_setting['roles'] == []):
                 self.inventory['serverspec'].append(host_setting)
 
-        #print(self.inventory)
-        #print(yaml.safe_dump(self.inventory, default_flow_style=False ))
 
 
     def export_serverspec_inventory(self):
         serverspec_inventory = self.inventory['serverspec']
-        print(yaml.safe_dump(serverspec_inventory, default_flow_style=False ))
+
+        f = open(os.path.join(self.export_path, 'Serverspec.1.inventory'), 'w')
+        f.write(yaml.safe_dump(serverspec_inventory, default_flow_style=False, allow_unicode=True))
+        f.close()
 
     def export_ansible_inventory(self):
         ansible_inventory = {}
@@ -78,25 +86,36 @@ class Excel_2_Yaml():
                     'ansible_ssh_pass': target['conn_password']
                 })
 
+        ansible_inventory_to_text = ''
+
         for role in ansible_inventory:
-            print("[ {}_GROUP ]".format(role))
+            add_text = "[ {}_GROUP ]\n".format(role)
+            ansible_inventory_to_text += add_text
 
             for target in ansible_inventory[role]:
-                print("{} ansible_user={} ansible_ssh_pass={}".format(
+                add_text = "{} ansible_user={} ansible_ssh_pass={}\n".format(
                                                                 target['target_name'],
                                                                 target['ansible_user'],
                                                                 target['ansible_ssh_pass']
-                ))
+                )
+                ansible_inventory_to_text += add_text
 
-        print("[linux:children]")
+
+        add_text = "[linux:children]\n"
+        ansible_inventory_to_text += add_text
+
         for role in ansible_inventory:
             if re.match("1-" , role):
-                print("{}_GROUP".format(role))
+                add_text = "{}_GROUP\n".format(role)
+                ansible_inventory_to_text += add_text
 
-        print("[windows:children]")
+        add_text = "[windows:children]\n"
+        ansible_inventory_to_text += add_text
+
         for role in ansible_inventory:
             if re.match("2-" , role):
-                print("{}_GROUP".format(role))
+                add_text = "{}_GROUP\n".format(role)
+                ansible_inventory_to_text += add_text
 
         other_settings = (
             '[linux:vars] \n'
@@ -107,7 +126,11 @@ class Excel_2_Yaml():
             'ansible_winrm_server_cert_validation = ignore \n'
         )
 
-        print(other_settings)
+        ansible_inventory_to_text += other_settings
+
+        f = open(os.path.join(self.export_path, 'Ansible.1.inventory'), 'w')
+        f.write(ansible_inventory_to_text)
+        f.close() 
 
 
     def parse_parameter_sheets(self):
@@ -117,17 +140,64 @@ class Excel_2_Yaml():
                 parameter_sheets.append(self.sheets[seet_name])
 
         for parameter_sheet in parameter_sheets:
+            # anssible
             yaml_data = ''
-            for row in range(20, parameter_sheet.nrows):
+            for row in range(18, parameter_sheet.nrows):
                 key = parameter_sheet.cell(row, 13).value
+                key_type = parameter_sheet.cell(row, 14).value
                 value = parameter_sheet.cell(row, 9).value
+                
+                if key_type != 'Object' and value == '':
+                    continue
+                if value != '':
+                    value = "'{}'".format(value)
+
+                yaml_col = "{}: {}".format(key, value)
+
+                yaml_data += yaml_col + '\n'
+            self.hostvars['ansible'][parameter_sheet.name] = yaml.load(yaml_data)
+
+            # serverspec
+            yaml_data = ''
+            for row in range(18, parameter_sheet.nrows):
+                key = parameter_sheet.cell(row, 13).value
+                value = parameter_sheet.cell(row, 10).value
                 if value != '':
                     value = "'{}'".format(value)
                 yaml_col = "{}: {}".format(key, value)
 
                 yaml_data += yaml_col + '\n'
-            print("============{}======================".format(parameter_sheet.name))
-            print(yaml.load(yaml_data))
+            self.hostvars['serverspec'][parameter_sheet.name] = yaml.load(yaml_data)
+
+
+    def del_null_vars(self, target_dict):
+        filtered_dict = target_dict
+        for key, val in target_dict.items():
+            if val == None:
+                filtered_dict.pop(key)
+            elif isinstance(val, dict):
+                filtered_dict[key] = self.del_null_vars(val)
+        return filtered_dict
+
+    def export_ansible_hostvars(self):
+        for sheetname, vars in self.hostvars['ansible'].items():
+            vars = self.del_null_vars(vars)
+            connection_hostname = vars['connection_hostname']
+            f = open(os.path.join(self.export_path, '{}.yml'.format(connection_hostname)), 'w')
+            f.write(yaml.dump(vars, default_flow_style=False, allow_unicode=True))
+            f.close()
+
+    def export_serverspec_hostvars(self):
+        properties = {}
+        for sheetname, vars in self.hostvars['ansible'].items():
+            vars = self.del_null_vars(vars)
+            connection_hostname = vars['connection_hostname']
+            properties[connection_hostname] = vars
+
+
+        f = open(os.path.join(self.export_path, 'properties.yml'), 'w')
+        f.write(yaml.dump(properties, default_flow_style=False, allow_unicode=True))
+        f.close()
 
 
 def main():
@@ -136,15 +206,19 @@ def main():
     sys.stdout = codecs.getwriter('utf_8')(sys.stdout)
     sys.stdin = codecs.getreader('utf_8')(sys.stdin)
 
-    excel2yaml = Excel_2_Yaml('./Excel2YAML_1.0.0.xlsm')
+    excel2yaml = Excel_2_Yaml('./Excel2YAML_1.0.0.xlsm', './export_files')
 
     excel2yaml.parse_inventory()
-    print("============ANSIBLE=========")
+    print("============INVENTORY:ANSIBLE=========")
     excel2yaml.export_ansible_inventory()
-    print("============SERVERSPEC======")
+    print("============INVENTORY:SERVERSPEC======")
     excel2yaml.export_serverspec_inventory()
 
     excel2yaml.parse_parameter_sheets()
+    print("============HTOSVARS:ANSIBLE=========")
+    excel2yaml.export_ansible_hostvars()
+    print("============HTOSVARS:SERVERSPEC=========")
+    excel2yaml.export_serverspec_hostvars()
 
 if __name__ == '__main__':
     main()
